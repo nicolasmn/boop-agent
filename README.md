@@ -1,6 +1,11 @@
-# boop-agent
+# Boop
 
-Text your own Claude agent from iMessage. It spawns focused sub-agents, remembers what matters, and grows through the integrations you add.
+An iMessage-based personal agent built on top of the [Claude Agent SDK](https://docs.claude.com/en/api/agent-sdk/overview).
+
+📺 **Watch the walkthrough:** [YouTube — How I built Boop](https://www.youtube.com/watch?v=3Rc4MlMJMNU)
+
+> **This is a starting point, not a finished product.**
+> It's the architecture I built for my own personal agent, opened up as a template so you can take it, text-enable your own Claude, and extend it however you want. The repo ships with example integrations (Gmail, Calendar, Notion, Slack) that are **commented out by default** — so first-run works with zero setup and you opt into tools as you need them.
 
 ```
  iMessage  →  Sendblue webhook  →  Interaction agent  →  Sub-agents (per task)
@@ -9,7 +14,11 @@ Text your own Claude agent from iMessage. It spawns focused sub-agents, remember
                                     Memory store  ←──  Integrations (your MCP tools)
 ```
 
-This is a **starting point**, not a polished product. It's deliberately minimal so you can read every file in under an hour and bend it into whatever you want.
+Built on:
+- [Claude Agent SDK](https://github.com/anthropics/claude-agent-sdk-typescript) — the loop, tool use, sub-agents, MCP
+- [Sendblue](https://sendblue.co) — iMessage in/out (free on their agent plan)
+- [Convex](https://convex.dev) — real-time database for memory, agents, drafts
+- Your [Claude Code](https://claude.com/code) subscription — no separate Anthropic API key required
 
 ---
 
