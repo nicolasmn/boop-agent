@@ -38,7 +38,9 @@ Built on:
 ## What you get
 
 - **iMessage in / iMessage out** via Sendblue (with typing indicators and webhook dedup).
-- **Dispatcher + workers** pattern: a lean interaction agent decides what to do, spawns focused sub-agents to actually do it.
+- **Sendblue CLI integration** — `npm run dev` auto-registers the inbound webhook for you every restart (no re-pasting into the dashboard when free ngrok rotates your URL).
+- **Dispatcher + workers** pattern: a lean interaction agent decides what to do, spawns focused sub-agents that actually do the work.
+- **Pure dispatcher** — the interaction agent has only memory + spawn + automation + draft tools. Web access, files, and integrations are explicitly denied to it; sub-agents get `WebSearch` / `WebFetch` / the integrations.
 - **Tiered memory** (short / long / permanent) with post-turn extraction, decay, and cleaning.
 - **Vector search** for recall when you add an embeddings key (Voyage or OpenAI) — falls back to substring.
 - **Memory consolidation** — a nightly proposer + judge pass that merges duplicates and resolves contradictions.
@@ -47,8 +49,8 @@ Built on:
 - **Heartbeat + retry** — stuck agents auto-fail, debug dashboard can retry.
 - **OAuth flow** — connect Google and Slack with a click from the debug UI, tokens stored in Convex.
 - **Integrations as MCP servers** — drop a folder into `/integrations/`, register it, your agent can use it.
-- **Four working examples**: Google Calendar, Gmail, Notion, Slack.
-- **Debug dashboard** (React + Vite) — chat, agents, automations, drafts, memories, events, connections.
+- **Four working examples (off by default)**: Google Calendar, Gmail, Notion, Slack.
+- **Debug dashboard** (React + Vite) with a Boop mascot — Dashboard (spend + tokens + agent status), Agents (timeline + integration logos), Automations, Memory (table + force-directed graph), Events, Connections.
 - **Convex** for persistence — real-time, typed, free tier.
 - **Uses your Claude Code subscription** — no separate Anthropic API key required.
 
@@ -100,11 +102,7 @@ Public URL:        https://<abc123>.ngrok.app
 Sendblue webhook:  https://<abc123>.ngrok.app/sendblue/webhook
 ```
 
-Then wire it up in Sendblue:
-
-1. **Sendblue dashboard → API Settings → Webhook Configuration**
-2. Add as an **INBOUND MESSAGE** webhook
-3. Paste the `Sendblue webhook` URL from the banner, save
+On free ngrok, **the webhook auto-registers with Sendblue every boot** — no manual paste needed. For stable URLs (ngrok reserved or Cloudflare Tunnel), set the webhook once in the dashboard.
 
 Text your Sendblue-provisioned number from a **different** phone. The agent replies.
 
@@ -361,8 +359,13 @@ boop-agent/
 │   ├── drafts.ts
 │   ├── memoryEvents.ts
 │   └── sendblueDedup.ts
-├── debug/                         # Dashboard (chat, agents, memory, events)
-├── scripts/setup.ts               # Interactive setup CLI
+├── debug/                         # Dashboard: Dashboard / Agents / Automations / Memory / Events / Connections
+├── scripts/
+│   ├── setup.ts                   # Interactive setup CLI
+│   ├── dev.mjs                    # One-command orchestrator (server + convex + vite + ngrok)
+│   ├── preflight.mjs              # Checks convex/_generated exists before booting
+│   ├── sendblue-sync.mjs          # Pulls phone number from `sendblue lines`
+│   └── sendblue-webhook.mjs       # Registers inbound webhook via Sendblue CLI
 ├── README.md           ← you are here
 ├── ARCHITECTURE.md
 └── INTEGRATIONS.md
@@ -380,16 +383,25 @@ boop-agent/
 **Convex errors / `VITE_CONVEX_URL is not set`.**
 - Run `npx convex dev` manually. Ensure `.env.local` has both `CONVEX_URL` and `VITE_CONVEX_URL`.
 
+**"Could not find public function for X:Y".**
+- `CONVEX_DEPLOYMENT` and `CONVEX_URL` in `.env.local` are pointing at different projects. `convex dev` pushes functions to `CONVEX_DEPLOYMENT` but the client reads from `CONVEX_URL`. Fix: make sure the URL has the same name as the deployment — `CONVEX_DEPLOYMENT=dev:foo-bar-123` → `CONVEX_URL=https://foo-bar-123.convex.cloud`. Re-running `npm run setup` now auto-syncs these.
+
 **Agent replies but can't use my integration.**
 - Check it's registered — `server/integrations/registry.ts` imports list.
 - Check the `register()` function actually calls `opts.registerIntegration(mod)` (not commented out).
 - Check required env vars are set. Tools return an auth error if the token is missing.
 
 **I want to skip Sendblue for now.**
-- Use the debug dashboard's Chat tab (`http://localhost:5173`) — it sends to `/chat` directly, no SMS needed.
+- The server exposes `POST /chat` with `{ conversationId, content }` — curl or a tiny client can drive the agent directly, no iMessage required.
 
 **Claude SDK says no credentials.**
 - Run `claude` once and sign in, or set `ANTHROPIC_API_KEY` in `.env.local`.
+
+**"Cannot send messages to self" / "missing required parameter: from_number".**
+- `SENDBLUE_FROM_NUMBER` is set to your personal cell instead of your Sendblue-provisioned number. Run `npm run sendblue:sync` to pull the correct number from `sendblue lines` and write it to `.env.local`.
+
+**"Dashboard crashed" in the debug UI.**
+- The ErrorBoundary caught something. Check the server logs (`server │` stream) and the browser console — both will have the real error. Most common cause: a new Convex function hasn't been deployed yet. Restart `npm run dev` so `convex dev` re-pushes.
 
 ---
 
