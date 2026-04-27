@@ -1,6 +1,6 @@
 import express from "express";
-import { api } from "../convex/_generated/api.js";
-import { convex } from "./convex-client.js";
+import { claimHandle } from "../db/queries/sendblueDedup.js";
+import { sendMessage } from "../db/queries/messages.js";
 import { handleUserMessage } from "./interaction-agent.js";
 import { broadcast } from "./broadcast.js";
 
@@ -50,7 +50,6 @@ function normalizeE164(n: string | undefined): string | undefined {
   const trimmed = n.trim();
   if (!trimmed) return undefined;
   if (trimmed.startsWith("+")) return trimmed;
-  // Bare US-length numbers get a +1. Longer/shorter just get a leading +.
   if (/^\d{10}$/.test(trimmed)) return `+1${trimmed}`;
   if (/^\d{11,15}$/.test(trimmed)) return `+${trimmed}`;
   return trimmed;
@@ -59,7 +58,7 @@ function normalizeE164(n: string | undefined): string | undefined {
 export async function sendImessage(toNumber: string, text: string): Promise<void> {
   const h = headers();
   if (!h) {
-    console.warn("[sendblue] missing credentials — not sending");
+    console.warn("[sendblue] missing credentials \u2014 not sending");
     return;
   }
   const from = normalizeE164(process.env.SENDBLUE_FROM_NUMBER);
@@ -81,19 +80,19 @@ export async function sendImessage(toNumber: string, text: string): Promise<void
       console.error(`[sendblue] send failed ${res.status}: ${body}`);
       if (body.includes("missing required parameter") && body.includes("from_number")) {
         console.error(
-          `[sendblue] → Set SENDBLUE_FROM_NUMBER in .env.local to your Sendblue-provisioned number and restart the server.`,
+          `[sendblue] \u2192 Set SENDBLUE_FROM_NUMBER in .env.local to your Sendblue-provisioned number and restart the server.`,
         );
       } else if (body.includes("Cannot send messages to self")) {
         console.error(
-          `[sendblue] → SENDBLUE_FROM_NUMBER is your personal cell. It must be the Sendblue-provisioned number (the one people text TO).`,
+          `[sendblue] \u2192 SENDBLUE_FROM_NUMBER is your personal cell. It must be the Sendblue-provisioned number (the one people text TO).`,
         );
       } else if (body.includes("This phone number is not defined")) {
         console.error(
-          `[sendblue] → Sendblue doesn't recognize from_number=${from}. Run \`npm run sendblue:sync\` to pull the correct one from \`sendblue lines\`, then restart the server.`,
+          `[sendblue] \u2192 Sendblue doesn't recognize from_number=${from}. Run \`npm run sendblue:sync\` to pull the correct one from \`sendblue lines\`, then restart the server.`,
         );
       }
     } else {
-      console.log(`[sendblue] → sent ${part.length} chars to ${toNumber}`);
+      console.log(`[sendblue] \u2192 sent ${part.length} chars to ${toNumber}`);
     }
   }
 }
@@ -130,9 +129,7 @@ export function createSendblueRouter(): express.Router {
     }
 
     if (message_handle) {
-      const { claimed } = await convex.mutation(api.sendblueDedup.claim, {
-        handle: message_handle,
-      });
+      const claimed = await claimHandle(message_handle);
       if (!claimed) {
         res.json({ ok: true, deduped: true });
         return;
@@ -141,8 +138,8 @@ export function createSendblueRouter(): express.Router {
 
     const conversationId = `sms:${from_number}`;
     const turnTag = Math.random().toString(36).slice(2, 8);
-    const preview = content.length > 100 ? content.slice(0, 100) + "…" : content;
-    console.log(`[turn ${turnTag}] ← ${from_number}: ${JSON.stringify(preview)}`);
+    const preview = content.length > 100 ? content.slice(0, 100) + "\u2026" : content;
+    console.log(`[turn ${turnTag}] \u2190 ${from_number}: ${JSON.stringify(preview)}`);
     const start = Date.now();
 
     broadcast("message_in", { conversationId, content, from_number, handle: message_handle });
@@ -158,18 +155,18 @@ export function createSendblueRouter(): express.Router {
       });
       if (reply) {
         const elapsed = ((Date.now() - start) / 1000).toFixed(1);
-        const replyPreview = reply.length > 100 ? reply.slice(0, 100) + "…" : reply;
+        const replyPreview = reply.length > 100 ? reply.slice(0, 100) + "\u2026" : reply;
         console.log(
-          `[turn ${turnTag}] → reply (${elapsed}s, ${reply.length} chars): ${JSON.stringify(replyPreview)}`,
+          `[turn ${turnTag}] \u2192 reply (${elapsed}s, ${reply.length} chars): ${JSON.stringify(replyPreview)}`,
         );
         await sendImessage(from_number, reply);
-        await convex.mutation(api.messages.send, {
+        await sendMessage({
           conversationId,
           role: "assistant",
           content: reply,
         });
       } else {
-        console.log(`[turn ${turnTag}] → (no reply)`);
+        console.log(`[turn ${turnTag}] \u2192 (no reply)`);
       }
     } catch (err) {
       console.error(`[turn ${turnTag}] handler error`, err);

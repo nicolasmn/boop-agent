@@ -1,6 +1,7 @@
 import { query } from "@anthropic-ai/claude-agent-sdk";
-import { api } from "../../convex/_generated/api.js";
-import { convex } from "../convex-client.js";
+import { upsertMemory } from "../../db/queries/memoryRecords.js";
+import { emitMemoryEvent } from "../../db/queries/memoryEvents.js";
+import { recordUsage } from "../../db/queries/usageRecords.js";
 import { embed } from "../embeddings.js";
 import { aggregateUsageFromResult, EMPTY_USAGE, type UsageTotals } from "../usage.js";
 import { SEGMENT_DEFAULTS, makeMemoryId, type MemorySegment } from "./types.js";
@@ -17,14 +18,14 @@ Rules:
 - Prefer fewer, higher-quality facts over many trivial ones.
 - Skip anything transient ("I'm tired right now"). Context facts should describe ongoing state, not momentary feelings.
 - Segment meanings:
-  - identity: name, role, location, core traits (highest priority — rarely changes)
+  - identity: name, role, location, core traits (highest priority \u2014 rarely changes)
   - correction: the user explicitly corrected something. "No, it's Sarah not Sara." "Actually I prefer X not Y." Set "corrects" to the wrong value or prior belief being overturned. Use this instead of preference/identity when the user is FIXING something rather than stating it fresh.
   - preference: how they like things done (style, defaults)
   - relationship: people they know + how
   - project: ongoing work or goals
   - knowledge: facts about their world
   - context: current ongoing situation
-- Importance defaults: identity 0.85, correction 0.80, relationship 0.75, preference 0.70, project 0.65, knowledge 0.60, context 0.40. Bump up or down only when you have a clear reason — trust the defaults.
+- Importance defaults: identity 0.85, correction 0.80, relationship 0.75, preference 0.70, project 0.65, knowledge 0.60, context 0.40. Bump up or down only when you have a clear reason \u2014 trust the defaults.
 - The "corrects" field is ONLY for segment="correction". Omit it (or null) for everything else.
 - Return empty facts array if nothing durable.
 
@@ -67,7 +68,7 @@ export async function extractAndStore(opts: {
     }
 
     if (usage.costUsd > 0 || usage.inputTokens > 0) {
-      await convex.mutation(api.usageRecords.record, {
+      await recordUsage({
         source: "extract",
         conversationId: opts.conversationId,
         turnId: opts.turnId,
@@ -88,9 +89,7 @@ export async function extractAndStore(opts: {
 
     for (const f of facts) {
       const defaults = SEGMENT_DEFAULTS[f.segment];
-      if (!defaults) continue; // skip unknown segment rather than crashing
-      // Clamp importance to [0, 1]; fall back to segment default when the
-      // LLM omits it or returns garbage.
+      if (!defaults) continue;
       const rawImportance =
         typeof f.importance === "number" && Number.isFinite(f.importance)
           ? Math.max(0, Math.min(1, f.importance))
@@ -101,7 +100,7 @@ export async function extractAndStore(opts: {
         f.segment === "correction" && f.corrects
           ? JSON.stringify({ corrects: f.corrects })
           : undefined;
-      await convex.mutation(api.memoryRecords.upsert, {
+      await upsertMemory({
         memoryId,
         content: f.content,
         tier: defaults.tier,
@@ -114,7 +113,7 @@ export async function extractAndStore(opts: {
       });
     }
 
-    await convex.mutation(api.memoryEvents.emit, {
+    await emitMemoryEvent({
       eventType: "memory.extracted",
       conversationId: opts.conversationId,
       data: JSON.stringify({ turnId: opts.turnId, count: facts.length }),

@@ -1,6 +1,6 @@
 import { query } from "@anthropic-ai/claude-agent-sdk";
-import { api } from "../convex/_generated/api.js";
-import { convex } from "./convex-client.js";
+import { createAgent, updateAgent, addAgentLog, getAgent } from "../db/queries/agents.js";
+import { recordUsage } from "../db/queries/usageRecords.js";
 import { broadcast } from "./broadcast.js";
 import { buildMcpServersForIntegrations, listIntegrations } from "./integrations/registry.js";
 import { createDraftStagingMcp } from "./draft-tools.js";
@@ -68,13 +68,13 @@ export async function spawnExecutionAgent(opts: SpawnOptions): Promise<SpawnResu
   const shortId = agentId.slice(-6);
   const logAgent = (msg: string) => console.log(`[agent ${shortId}] ${msg}`);
   const taskPreview =
-    opts.task.length > 120 ? opts.task.slice(0, 120) + "…" : opts.task;
+    opts.task.length > 120 ? opts.task.slice(0, 120) + "\u2026" : opts.task;
   logAgent(
-    `spawn: ${name} [${opts.integrations.join(", ") || "no integrations"}] — ${JSON.stringify(taskPreview)}`,
+    `spawn: ${name} [${opts.integrations.join(", ") || "no integrations"}] \u2014 ${JSON.stringify(taskPreview)}`,
   );
   const agentStart = Date.now();
 
-  await convex.mutation(api.agents.create, {
+  await createAgent({
     agentId,
     conversationId: opts.conversationId,
     name,
@@ -83,7 +83,7 @@ export async function spawnExecutionAgent(opts: SpawnOptions): Promise<SpawnResu
   });
   broadcast("agent_spawned", { agentId, name, task: opts.task });
 
-  await convex.mutation(api.agents.update, { agentId, status: "running" });
+  await updateAgent({ agentId, status: "running" });
 
   const integrationServers = await buildMcpServersForIntegrations(
     opts.integrations,
@@ -117,8 +117,6 @@ export async function spawnExecutionAgent(opts: SpawnOptions): Promise<SpawnResu
         model: requestedModel,
         mcpServers,
         allowedTools,
-        // Load .claude/skills/ so the model can invoke SKILL.md playbooks. Without
-        // this the SDK runs in isolation mode and skills are silently ignored.
         settingSources: ["project"],
         permissionMode: "bypassPermissions",
         abortController: abort,
@@ -128,15 +126,11 @@ export async function spawnExecutionAgent(opts: SpawnOptions): Promise<SpawnResu
         for (const block of msg.message.content) {
           if (block.type === "text") {
             buffer += block.text;
-            await convex.mutation(api.agents.addLog, {
-              agentId,
-              logType: "text",
-              content: block.text,
-            });
+            await addAgentLog({ agentId, logType: "text", content: block.text });
           } else if (block.type === "tool_use") {
             const toolShort = block.name.replace(/^mcp__[a-z-]+__/, "");
             logAgent(`tool: ${toolShort}`);
-            await convex.mutation(api.agents.addLog, {
+            await addAgentLog({
               agentId,
               logType: "tool_use",
               toolName: block.name,
@@ -153,27 +147,17 @@ export async function spawnExecutionAgent(opts: SpawnOptions): Promise<SpawnResu
                   .map((c: { type: string; text?: string }) => (c.type === "text" ? (c.text ?? "") : ""))
                   .join("")
               : String(block.content ?? "");
-            await convex.mutation(api.agents.addLog, {
-              agentId,
-              logType: "tool_result",
-              content: text.slice(0, 2000),
-            });
+            await addAgentLog({ agentId, logType: "tool_result", content: text.slice(0, 2000) });
           }
         }
       } else if (msg.type === "result") {
-        // Always take the aggregate from modelUsage — msg.usage is just the
-        // final turn's raw tokens and massively undercounts on tool-heavy runs.
         usage = aggregateUsageFromResult(msg, requestedModel);
       }
     }
   } catch (err) {
     status = abort.signal.aborted ? "cancelled" : "failed";
     errorMsg = String(err);
-    await convex.mutation(api.agents.addLog, {
-      agentId,
-      logType: "error",
-      content: errorMsg,
-    });
+    await addAgentLog({ agentId, logType: "error", content: errorMsg });
   } finally {
     running.delete(agentId);
   }
@@ -183,7 +167,7 @@ export async function spawnExecutionAgent(opts: SpawnOptions): Promise<SpawnResu
     `done (${status}, ${elapsed}s, in/out tokens ${usage.inputTokens}/${usage.outputTokens}, cache r/w ${usage.cacheReadTokens}/${usage.cacheCreationTokens}, $${usage.costUsd.toFixed(4)})`,
   );
 
-  await convex.mutation(api.agents.update, {
+  await updateAgent({
     agentId,
     status,
     result: buffer,
@@ -194,9 +178,9 @@ export async function spawnExecutionAgent(opts: SpawnOptions): Promise<SpawnResu
     cacheCreationTokens: usage.cacheCreationTokens,
     costUsd: usage.costUsd,
   });
-  // Also append to the usage log so total-cost queries cover every layer.
+
   if (usage.costUsd > 0 || usage.inputTokens > 0) {
-    await convex.mutation(api.usageRecords.record, {
+    await recordUsage({
       source: "execution",
       conversationId: opts.conversationId,
       agentId,
@@ -209,8 +193,8 @@ export async function spawnExecutionAgent(opts: SpawnOptions): Promise<SpawnResu
       durationMs: Date.now() - agentStart,
     });
   }
-  broadcast("agent_done", { agentId, status, result: buffer.slice(0, 200) });
 
+  broadcast("agent_done", { agentId, status, result: buffer.slice(0, 200) });
   return { agentId, result: buffer || errorMsg || "(no output)", status };
 }
 
@@ -226,9 +210,9 @@ export function runningAgentIds(): string[] {
 }
 
 export async function retryAgent(agentId: string): Promise<SpawnResult | null> {
-  const existing = await convex.query(api.agents.get, { agentId });
+  const existing = await getAgent(agentId);
   if (!existing) return null;
-  return await spawnExecutionAgent({
+  return spawnExecutionAgent({
     task: existing.task,
     integrations: existing.mcpServers,
     conversationId: existing.conversationId,

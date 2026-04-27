@@ -1,15 +1,10 @@
-import { api } from "../../convex/_generated/api.js";
-import { convex } from "../convex-client.js";
+import { listMemories, setLifecycle } from "../../db/queries/memoryRecords.js";
+import { emitMemoryEvent } from "../../db/queries/memoryEvents.js";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const PRUNE_THRESHOLD = 0.05;
 const ARCHIVE_THRESHOLD = 0.15;
 
-// Ping's adaptive-decay constants. beta pulls the curve; half_life is the
-// nominal half-life (days) that gets stretched by importance.
-// Effective half-life ≈ BASE_HALF_LIFE_DAYS × (1 + importance) / DECAY_BETA.
-// With beta=0.8 and half_life=11.25, importance=0.5 → ~21 days,
-// importance=0.9 → ~27 days. (Ignoring per-segment decayRate trim.)
 const DECAY_BETA = 0.8;
 const BASE_HALF_LIFE_DAYS = 11.25;
 const LN2 = Math.log(2);
@@ -20,10 +15,10 @@ const LN2 = Math.log(2);
  * importance so identity / correction memories persist much longer than
  * context.
  *
- * Access-count reinforcement multiplies the post-decay score — recent,
+ * Access-count reinforcement multiplies the post-decay score \u2014 recent,
  * frequently-recalled memories resist decay. This replaces the old
- * `min(1, 1 + log1p(accessCount) × 0.1)` formula, which was a no-op because
- * the floor of the inner expression is ≥ 1 and the cap was also 1.
+ * `min(1, 1 + log1p(accessCount) \u00d7 0.1)` formula, which was a no-op because
+ * the floor of the inner expression is \u2265 1 and the cap was also 1.
  */
 function effectiveScore(mem: {
   importance: number;
@@ -34,8 +29,6 @@ function effectiveScore(mem: {
   const daysSinceAccess = Math.max(0, (Date.now() - mem.lastAccessedAt) / DAY_MS);
   const adaptiveHalfLife = BASE_HALF_LIFE_DAYS * (1 + mem.importance);
   const lambda = (LN2 / Math.max(adaptiveHalfLife, 0.001)) * DECAY_BETA;
-  // decayRate is the per-segment multiplier — higher rate shortens half-life.
-  // Keeps backward-compat for callers that still set decayRate per-tier.
   const effectiveLambda = lambda * (1 + mem.decayRate);
   const decayed = mem.importance * Math.exp(-effectiveLambda * daysSinceAccess);
   const reinforcement = 1 + Math.log1p(mem.accessCount) * 0.1;
@@ -51,7 +44,7 @@ export async function cleanMemories(): Promise<{
   archived: number;
   pruned: number;
 }> {
-  const active = await convex.query(api.memoryRecords.list, { lifecycle: "active", limit: 500 });
+  const active = await listMemories({ lifecycle: "active", limit: 500 });
   let archived = 0;
   let pruned = 0;
 
@@ -59,21 +52,15 @@ export async function cleanMemories(): Promise<{
     if (mem.tier === "permanent") continue;
     const score = effectiveScore(mem);
     if (score < PRUNE_THRESHOLD) {
-      await convex.mutation(api.memoryRecords.setLifecycle, {
-        memoryId: mem.memoryId,
-        lifecycle: "pruned",
-      });
+      await setLifecycle(mem.memoryId, "pruned");
       pruned++;
     } else if (score < ARCHIVE_THRESHOLD && mem.tier !== "long") {
-      await convex.mutation(api.memoryRecords.setLifecycle, {
-        memoryId: mem.memoryId,
-        lifecycle: "archived",
-      });
+      await setLifecycle(mem.memoryId, "archived");
       archived++;
     }
   }
 
-  await convex.mutation(api.memoryEvents.emit, {
+  await emitMemoryEvent({
     eventType: "memory.cleaned",
     data: JSON.stringify({ scanned: active.length, archived, pruned }),
   });

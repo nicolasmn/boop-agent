@@ -1,7 +1,11 @@
 import { tool, createSdkMcpServer } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
-import { api } from "../convex/_generated/api.js";
-import { convex } from "./convex-client.js";
+import {
+  createDraft,
+  pendingDraftsByConversation,
+  getDraft,
+  setDraftStatus,
+} from "../db/queries/drafts.js";
 import { spawnExecutionAgent } from "./execution-agent.js";
 
 function randomId(prefix: string): string {
@@ -19,12 +23,7 @@ export function createDraftStagingMcp(conversationId: string) {
     tools: [
       tool(
         "save_draft",
-        `Save a draft of an external action (email, calendar event, message, etc.) for the user to review.
-ALWAYS call this instead of sending or creating something directly. The user will say "send it" in the next turn to commit.
-
-- summary: one-line description the user will see.
-- payload: JSON string with everything needed to execute the draft (provider-specific fields).
-- kind: short type tag like "gmail.reply", "gmail.new", "gcal.event", "slack.message".`,
+        `Save a draft of an external action (email, calendar event, message, etc.) for the user to review.\nALWAYS call this instead of sending or creating something directly. The user will say "send it" in the next turn to commit.\n\n- summary: one-line description the user will see.\n- payload: JSON string with everything needed to execute the draft (provider-specific fields).\n- kind: short type tag like "gmail.reply", "gmail.new", "gcal.event", "slack.message".`,
         {
           kind: z.string(),
           summary: z.string(),
@@ -32,7 +31,7 @@ ALWAYS call this instead of sending or creating something directly. The user wil
         },
         async (args) => {
           const draftId = randomId("draft");
-          await convex.mutation(api.drafts.create, {
+          await createDraft({
             draftId,
             conversationId,
             kind: args.kind,
@@ -66,14 +65,12 @@ export function createDraftDecisionMcp(conversationId: string) {
         "List pending drafts in this conversation. Call this when the user says 'send it', 'yes', 'go ahead', etc. without a specific id.",
         {},
         async () => {
-          const drafts = await convex.query(api.drafts.pendingByConversation, {
-            conversationId,
-          });
+          const drafts = await pendingDraftsByConversation(conversationId);
           if (drafts.length === 0) {
             return { content: [{ type: "text" as const, text: "No pending drafts." }] };
           }
           const body = drafts
-            .map((d) => `• [${d.draftId}] (${d.kind}) ${d.summary}`)
+            .map((d) => `\u2022 [${d.draftId}] (${d.kind}) ${d.summary}`)
             .join("\n");
           return { content: [{ type: "text" as const, text: body }] };
         },
@@ -84,25 +81,14 @@ export function createDraftDecisionMcp(conversationId: string) {
         "Approve and execute a draft. Spawns an execution agent to actually perform the action based on the stored payload.",
         { draftId: z.string(), integrations: z.array(z.string()) },
         async (args) => {
-          const draft = await convex.query(api.drafts.get, { draftId: args.draftId });
+          const draft = await getDraft(args.draftId);
           if (!draft || draft.status !== "pending") {
             return {
-              content: [
-                {
-                  type: "text" as const,
-                  text: `Draft ${args.draftId} not found or already decided.`,
-                },
-              ],
+              content: [{ type: "text" as const, text: `Draft ${args.draftId} not found or already decided.` }],
             };
           }
-          await convex.mutation(api.drafts.setStatus, {
-            draftId: args.draftId,
-            status: "sent",
-          });
-          const task = `Execute this approved draft. Use the matching integration tool to actually send/create it.
-kind: ${draft.kind}
-summary: ${draft.summary}
-payload JSON: ${draft.payload}`;
+          await setDraftStatus(args.draftId, "sent");
+          const task = `Execute this approved draft. Use the matching integration tool to actually send/create it.\nkind: ${draft.kind}\nsummary: ${draft.summary}\npayload JSON: ${draft.payload}`;
           const res = await spawnExecutionAgent({
             task,
             integrations: args.integrations,
@@ -110,12 +96,7 @@ payload JSON: ${draft.payload}`;
             name: `send:${draft.kind}`,
           });
           return {
-            content: [
-              {
-                type: "text" as const,
-                text: `Draft ${args.draftId} executed.\n\n${res.result}`,
-              },
-            ],
+            content: [{ type: "text" as const, text: `Draft ${args.draftId} executed.\n\n${res.result}` }],
           };
         },
       ),
@@ -125,10 +106,7 @@ payload JSON: ${draft.payload}`;
         "Cancel a pending draft when the user says 'no', 'cancel', or revises the request.",
         { draftId: z.string() },
         async (args) => {
-          await convex.mutation(api.drafts.setStatus, {
-            draftId: args.draftId,
-            status: "rejected",
-          });
+          await setDraftStatus(args.draftId, "rejected");
           return {
             content: [{ type: "text" as const, text: `Draft ${args.draftId} rejected.` }],
           };

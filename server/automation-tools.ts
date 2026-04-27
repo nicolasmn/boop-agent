@@ -1,7 +1,11 @@
 import { tool, createSdkMcpServer } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
-import { api } from "../convex/_generated/api.js";
-import { convex } from "./convex-client.js";
+import {
+  createAutomation,
+  listAutomations,
+  setAutomationEnabled,
+  removeAutomation,
+} from "../db/queries/automations.js";
 import { availableIntegrations } from "./execution-agent.js";
 import { nextRunFor, validateSchedule } from "./automations.js";
 
@@ -18,50 +22,28 @@ export function createAutomationMcp(conversationId: string) {
     tools: [
       tool(
         "create_automation",
-        `Schedule a recurring task. The agent will run the task on the schedule and reply with the result.
-
-Cron expressions (5 fields: min hour day-of-month month day-of-week). Examples:
-  "0 8 * * *"      — every day at 8am
-  "*/15 * * * *"   — every 15 minutes
-  "0 9 * * 1-5"    — weekdays at 9am
-  "0 18 * * 0"     — Sundays at 6pm
-
-Use this for anything the user says "every [time]" or "remind me" about.
-Integrations available: ${integrationHint}`,
+        `Schedule a recurring task. The agent will run the task on the schedule and reply with the result.\n\nCron expressions (5 fields: min hour day-of-month month day-of-week). Examples:\n  "0 8 * * *"      \u2014 every day at 8am\n  "*/15 * * * *"   \u2014 every 15 minutes\n  "0 9 * * 1-5"    \u2014 weekdays at 9am\n  "0 18 * * 0"     \u2014 Sundays at 6pm\n\nUse this for anything the user says "every [time]" or "remind me" about.\nIntegrations available: ${integrationHint}`,
         {
           name: z.string().describe("Short label, e.g. 'morning email digest'."),
           schedule: z.string().describe("Cron expression (5 fields)."),
-          task: z
-            .string()
-            .describe("Specific task for the sub-agent — what to look up, draft, or summarize."),
-          integrations: z
-            .array(z.string())
-            .optional()
-            .default([])
-            .describe(
-              "Integration names the sub-agent needs for this task. Pass [] for reminder-only automations that don't need external tools.",
-            ),
-          notify: z
-            .boolean()
-            .optional()
-            .default(true)
-            .describe("If true, send the result to this conversation when it runs."),
+          task: z.string().describe("Specific task for the sub-agent \u2014 what to look up, draft, or summarize."),
+          integrations: z.array(z.string()).optional().default([]).describe(
+            "Integration names the sub-agent needs for this task. Pass [] for reminder-only automations that don't need external tools.",
+          ),
+          notify: z.boolean().optional().default(true).describe(
+            "If true, send the result to this conversation when it runs.",
+          ),
         },
         async (args) => {
           const validation = validateSchedule(args.schedule);
           if (!validation.valid) {
             return {
-              content: [
-                {
-                  type: "text" as const,
-                  text: `Invalid cron expression: ${validation.error}`,
-                },
-              ],
+              content: [{ type: "text" as const, text: `Invalid cron expression: ${validation.error}` }],
             };
           }
           const automationId = randomId("auto");
           const nextRunAt = nextRunFor(args.schedule) ?? undefined;
-          await convex.mutation(api.automations.create, {
+          await createAutomation({
             automationId,
             name: args.name,
             task: args.task,
@@ -73,12 +55,7 @@ Integrations available: ${integrationHint}`,
           });
           const nextStr = nextRunAt ? new Date(nextRunAt).toLocaleString() : "unknown";
           return {
-            content: [
-              {
-                type: "text" as const,
-                text: `Created automation ${automationId} "${args.name}" — next run: ${nextStr}.`,
-              },
-            ],
+            content: [{ type: "text" as const, text: `Created automation ${automationId} "${args.name}" \u2014 next run: ${nextStr}.` }],
           };
         },
       ),
@@ -88,16 +65,13 @@ Integrations available: ${integrationHint}`,
         "List all automations for this conversation.",
         { enabledOnly: z.boolean().optional().default(false) },
         async (args) => {
-          const all = await convex.query(api.automations.list, {
-            enabledOnly: args.enabledOnly,
-          });
+          const all = await listAutomations(args.enabledOnly);
           const mine = all.filter((a) => a.conversationId === conversationId);
           if (mine.length === 0) {
             return { content: [{ type: "text" as const, text: "No automations." }] };
           }
           const lines = mine.map(
-            (a) =>
-              `• [${a.automationId}] ${a.enabled ? "●" : "○"} "${a.name}" — ${a.schedule} — ${a.task}`,
+            (a) => `\u2022 [${a.automationId}] ${a.enabled ? "\u25cf" : "\u25cb"} "${a.name}" \u2014 ${a.schedule} \u2014 ${a.task}`,
           );
           return { content: [{ type: "text" as const, text: lines.join("\n") }] };
         },
@@ -108,14 +82,9 @@ Integrations available: ${integrationHint}`,
         "Enable or disable an automation by id.",
         { automationId: z.string(), enabled: z.boolean() },
         async (args) => {
-          const id = await convex.mutation(api.automations.setEnabled, args);
+          const ok = await setAutomationEnabled(args.automationId, args.enabled);
           return {
-            content: [
-              {
-                type: "text" as const,
-                text: id ? `Set ${args.automationId} enabled=${args.enabled}.` : `Not found.`,
-              },
-            ],
+            content: [{ type: "text" as const, text: ok ? `Set ${args.automationId} enabled=${args.enabled}.` : "Not found." }],
           };
         },
       ),
@@ -125,14 +94,9 @@ Integrations available: ${integrationHint}`,
         "Permanently remove an automation.",
         { automationId: z.string() },
         async (args) => {
-          const id = await convex.mutation(api.automations.remove, args);
+          const ok = await removeAutomation(args.automationId);
           return {
-            content: [
-              {
-                type: "text" as const,
-                text: id ? `Deleted ${args.automationId}.` : `Not found.`,
-              },
-            ],
+            content: [{ type: "text" as const, text: ok ? `Deleted ${args.automationId}.` : "Not found." }],
           };
         },
       ),

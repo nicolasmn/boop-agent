@@ -1,7 +1,12 @@
 import { tool, createSdkMcpServer } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
-import { api } from "../../convex/_generated/api.js";
-import { convex } from "../convex-client.js";
+import {
+  upsertMemory,
+  markAccessed,
+  searchMemories,
+  vectorSearchMemories,
+} from "../../db/queries/memoryRecords.js";
+import { emitMemoryEvent } from "../../db/queries/memoryEvents.js";
 import { embed, embeddingsAvailable } from "../embeddings.js";
 import { DEFAULT_DECAY, SEGMENT_PREFERRED_TIER, makeMemoryId } from "./types.js";
 
@@ -22,7 +27,7 @@ export function createMemoryMcp(conversationId: string) {
     tools: [
       tool(
         "write_memory",
-        "Persist a fact about the user or conversation that you want available in future turns. Prefer aggressive writing — memory is cheap, forgetting is expensive. Only use for durable facts (preferences, identity, projects, relationships), NOT for transient conversational state.",
+        "Persist a fact about the user or conversation that you want available in future turns. Prefer aggressive writing \u2014 memory is cheap, forgetting is expensive. Only use for durable facts (preferences, identity, projects, relationships), NOT for transient conversational state.",
         {
           content: z.string().describe("The fact to remember, in one clear sentence."),
           segment: segmentEnum.describe(
@@ -39,7 +44,7 @@ export function createMemoryMcp(conversationId: string) {
           const tier = args.tier ?? SEGMENT_PREFERRED_TIER[args.segment];
           const memoryId = makeMemoryId();
           const embedding = (await embed(args.content)) ?? undefined;
-          await convex.mutation(api.memoryRecords.upsert, {
+          await upsertMemory({
             memoryId,
             content: args.content,
             tier,
@@ -49,7 +54,7 @@ export function createMemoryMcp(conversationId: string) {
             supersedes: args.supersedes,
             embedding,
           });
-          await convex.mutation(api.memoryEvents.emit, {
+          await emitMemoryEvent({
             eventType: "memory.written",
             conversationId,
             memoryId,
@@ -74,42 +79,35 @@ export function createMemoryMcp(conversationId: string) {
           limit: z.number().optional().default(10),
         },
         async (args) => {
-          let results: any[] = [];
+          let results: Awaited<ReturnType<typeof searchMemories>> = [];
           let mode: "vector" | "substring" = "substring";
 
           if (embeddingsAvailable()) {
             const queryVec = await embed(args.query);
             if (queryVec) {
-              const hits = await convex.action(api.memoryRecords.vectorSearch, {
-                embedding: queryVec,
-                limit: args.limit,
-              });
+              const hits = await vectorSearchMemories({ embedding: queryVec, limit: args.limit });
               results = hits.map((h) => h.record);
               mode = "vector";
             }
           }
           if (results.length === 0) {
-            results = await convex.query(api.memoryRecords.search, {
-              query: args.query,
-              limit: args.limit,
-            });
+            results = await searchMemories({ query: args.query, limit: args.limit });
           }
 
-          for (const r of results) {
-            await convex.mutation(api.memoryRecords.markAccessed, { memoryId: r.memoryId });
-          }
-          await convex.mutation(api.memoryEvents.emit, {
+          for (const r of results) await markAccessed(r.memoryId);
+          await emitMemoryEvent({
             eventType: "memory.recalled",
             conversationId,
             data: JSON.stringify({ query: args.query, hits: results.length, mode }),
           });
+
           if (results.length === 0) {
             return { content: [{ type: "text" as const, text: "No memories matched." }] };
           }
           const body = results
             .map(
               (r) =>
-                `• [${r.tier}/${r.segment} importance=${r.importance.toFixed(2)}] ${r.memoryId}: ${r.content}`,
+                `\u2022 [${r.tier}/${r.segment} importance=${r.importance.toFixed(2)}] ${r.memoryId}: ${r.content}`,
             )
             .join("\n");
           return { content: [{ type: "text" as const, text: body }] };

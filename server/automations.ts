@@ -1,6 +1,11 @@
 import { Cron } from "croner";
-import { api } from "../convex/_generated/api.js";
-import { convex } from "./convex-client.js";
+import {
+  listAutomations,
+  createAutomationRun,
+  updateAutomationRun,
+  markAutomationRan,
+} from "../db/queries/automations.js";
+import { sendMessage } from "../db/queries/messages.js";
 import { spawnExecutionAgent } from "./execution-agent.js";
 import { sendImessage } from "./sendblue.js";
 import { broadcast } from "./broadcast.js";
@@ -38,10 +43,7 @@ async function runAutomation(a: {
   notifyConversationId?: string;
 }): Promise<void> {
   const runId = randomId("run");
-  await convex.mutation(api.automations.createRun, {
-    runId,
-    automationId: a.automationId,
-  });
+  await createAutomationRun({ runId, automationId: a.automationId });
   broadcast("automation_started", { automationId: a.automationId, runId, name: a.name });
 
   try {
@@ -51,7 +53,7 @@ async function runAutomation(a: {
       conversationId: a.conversationId,
       name: `auto:${a.name}`,
     });
-    await convex.mutation(api.automations.updateRun, {
+    await updateAutomationRun({
       runId,
       status: res.status === "completed" ? "completed" : "failed",
       result: res.result,
@@ -61,28 +63,22 @@ async function runAutomation(a: {
     if (a.notifyConversationId && res.result) {
       if (a.notifyConversationId.startsWith("sms:")) {
         const number = a.notifyConversationId.slice(4);
-        const preamble = `[${a.name}]\n\n`;
-        await sendImessage(number, preamble + res.result);
+        await sendImessage(number, `[${a.name}]\n\n${res.result}`);
       }
-      await convex.mutation(api.messages.send, {
+      await sendMessage({
         conversationId: a.notifyConversationId,
         role: "assistant",
         content: `[${a.name}]\n\n${res.result}`,
       });
     }
-
     broadcast("automation_completed", { automationId: a.automationId, runId });
   } catch (err) {
-    await convex.mutation(api.automations.updateRun, {
-      runId,
-      status: "failed",
-      error: String(err),
-    });
+    await updateAutomationRun({ runId, status: "failed", error: String(err) });
     broadcast("automation_failed", { automationId: a.automationId, runId, error: String(err) });
   }
 
   const next = nextRunFor(a.schedule);
-  await convex.mutation(api.automations.markRan, {
+  await markAutomationRan({
     automationId: a.automationId,
     lastRunAt: Date.now(),
     nextRunAt: next ?? undefined,
@@ -90,11 +86,10 @@ async function runAutomation(a: {
 }
 
 export async function tickAutomations(): Promise<void> {
-  const all = await convex.query(api.automations.list, { enabledOnly: true });
+  const all = await listAutomations(true);
   const now = Date.now();
   const due = all.filter((a) => a.nextRunAt !== undefined && a.nextRunAt <= now);
   for (const a of due) {
-    // fire-and-forget so one slow automation doesn't block others
     runAutomation({
       automationId: a.automationId,
       name: a.name,
