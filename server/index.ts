@@ -4,7 +4,7 @@ import cors from "cors";
 import { createServer } from "node:http";
 import { WebSocketServer } from "ws";
 import { addClient } from "./broadcast.js";
-import { createSendblueRouter } from "./sendblue.js";
+import { createTelegramRouter, startPolling } from "./telegram.js";
 import { handleUserMessage } from "./interaction-agent.js";
 import { loadIntegrations } from "./integrations/registry.js";
 import { startCleanupLoop } from "./memory/clean.js";
@@ -29,7 +29,16 @@ async function main() {
     res.json({ ok: true, service: "boop-agent" });
   });
 
-  app.use("/sendblue", createSendblueRouter());
+  const telegramMode = (process.env.TELEGRAM_MODE ?? "webhook").toLowerCase();
+
+  if (telegramMode === "polling") {
+    // Polling: bot fetches updates from Telegram — no public URL needed
+    startPolling();
+  } else {
+    // Webhook: Telegram pushes updates to POST /telegram/webhook
+    app.use("/telegram", createTelegramRouter());
+  }
+
   app.use("/composio", createComposioRouter());
 
   app.post("/agents/:id/cancel", (req, res) => {
@@ -40,7 +49,6 @@ async function main() {
   app.post("/consolidate", async (_req, res) => {
     try {
       const { runConsolidation } = await import("./consolidation.js");
-      // Fire-and-forget so the HTTP request returns immediately.
       runConsolidation("manual").catch((err) =>
         console.error("[consolidation] manual run failed", err),
       );
@@ -87,7 +95,11 @@ async function main() {
     console.log(`boop-agent server listening on :${port}`);
     console.log(`  health      GET  http://localhost:${port}/health`);
     console.log(`  chat        POST http://localhost:${port}/chat`);
-    console.log(`  sendblue    POST http://localhost:${port}/sendblue/webhook`);
+    if (telegramMode === "polling") {
+      console.log(`  telegram    polling mode active`);
+    } else {
+      console.log(`  telegram    POST http://localhost:${port}/telegram/webhook`);
+    }
     console.log(`  websocket   WS   ws://localhost:${port}/ws`);
   });
 }
